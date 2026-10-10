@@ -35,54 +35,18 @@ class VectorStore:
 
     # ========================================================
     # ADD DOCUMENTS
-    # Supports:
     #
-    # add_documents(documents, embeddings)
-    # add_documents(embeddings, documents)
+    # documents  : list of dicts (one per chunk)
+    # embeddings : array-like, shape (n_documents, dimension)
     # ========================================================
 
     def add_documents(
         self,
-        first,
-        second,
+        documents,
+        embeddings,
     ):
 
-        if first is None or second is None:
-            return
-
-        # ----------------------------------------------------
-        # Identify which argument is embeddings
-        # ----------------------------------------------------
-
-        first_array = np.asarray(
-            first,
-            dtype="float32",
-        )
-
-        second_array = np.asarray(
-            second,
-            dtype="float32",
-        )
-
-        if (
-            first_array.ndim >= 1
-            and first_array.size > 0
-            and first_array.shape[-1] == self.dimension
-        ):
-
-            embeddings = first_array
-            documents = second
-
-        else:
-
-            documents = first
-            embeddings = second_array
-
-        # ----------------------------------------------------
-        # Validate documents
-        # ----------------------------------------------------
-
-        if documents is None:
+        if documents is None or embeddings is None:
             return
 
         documents = list(documents)
@@ -90,17 +54,9 @@ class VectorStore:
         if len(documents) == 0:
             return
 
-        # ----------------------------------------------------
-        # Normalize embedding shape
-        # ----------------------------------------------------
-
         embeddings = np.asarray(
             embeddings,
             dtype="float32",
-        )
-
-        embeddings = np.squeeze(
-            embeddings
         )
 
         if embeddings.ndim == 1:
@@ -109,10 +65,6 @@ class VectorStore:
                 1,
                 -1,
             )
-
-        # ----------------------------------------------------
-        # Validate dimension
-        # ----------------------------------------------------
 
         if embeddings.ndim != 2:
 
@@ -128,10 +80,6 @@ class VectorStore:
                 f"received {embeddings.shape[1]}"
             )
 
-        # ----------------------------------------------------
-        # Validate count
-        # ----------------------------------------------------
-
         if embeddings.shape[0] != len(documents):
 
             raise ValueError(
@@ -140,10 +88,6 @@ class VectorStore:
                 f"{embeddings.shape[0]} embeddings, "
                 f"{len(documents)} documents."
             )
-
-        # ----------------------------------------------------
-        # Add to FAISS
-        # ----------------------------------------------------
 
         self.index.add(
             embeddings

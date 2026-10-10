@@ -35,8 +35,8 @@ class HybridSearch:
         )
 
         self.vector_store.add_documents(
-            embeddings,
-            documents
+            documents,
+            embeddings
         )
 
         self.keyword_search.add_documents(
@@ -71,7 +71,7 @@ class HybridSearch:
             combined[key] = {
                 **result,
                 "semantic_score": result.get(
-                    "score",
+                    "semantic_score",
                     0.0
                 ),
                 "keyword_score": 0.0,
