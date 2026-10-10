@@ -10,7 +10,6 @@ import secrets
 from dotenv import load_dotenv
 
 from app.auth.users import create_user
-from app.core.security import hash_password
 from app.database.database import initialize_database
 
 load_dotenv()
@@ -67,7 +66,7 @@ def seed_users():
 
         created = create_user(
             username=user["username"],
-            password_hash=hash_password(password),
+            password=password,
             full_name=user["full_name"],
             role=user["role"],
             department=user["department"],
