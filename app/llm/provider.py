@@ -9,9 +9,18 @@ from abc import ABC, abstractmethod
 
 class LLMProvider(ABC):
 
+    name = "unknown"
+    evidence_only = False
+
     @abstractmethod
     def generate(self, prompt):
         raise NotImplementedError
+
+    def describe(self):
+        return {
+            "name": self.name,
+            "evidence_only": self.evidence_only,
+        }
 
 
 class MockLLMProvider(LLMProvider):
@@ -26,6 +35,9 @@ class MockLLMProvider(LLMProvider):
     - Multi-line PDF extraction
     - Removal of retrieval metadata
     """
+
+    name = "mock-evidence-extractor"
+    evidence_only = True
 
     def generate(self, prompt):
 
