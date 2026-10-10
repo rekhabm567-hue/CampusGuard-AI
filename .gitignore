@@ -1,0 +1,22 @@
+﻿# Secrets and environment variables
+.env
+.env.*
+!.env.example
+# Python virtual environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+# Local databases and sensitive data
+*.db
+*.sqlite
+*.sqlite3
+# Local document uploads and vector-store data
+data/documents/
+data/vectorstore/
+# Generated files
+generated_images/
