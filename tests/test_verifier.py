@@ -1,9 +1,13 @@
+import pytest
+
 from app.firewall.verifier import (
     CONTRADICTED,
     PARTIALLY_SUPPORTED,
     SUPPORTED,
     UNVERIFIED,
     ClaimVerifier,
+    eligibility_verdict,
+    extract_student_values,
     extract_thresholds,
     overall_status,
 )
@@ -107,14 +111,17 @@ def test_relevant_but_unconfirmed_claim_is_unverified():
     assert result["related"]
 
 
+# CHANGED: a correct "does not meet" claim is now verified by arithmetic
+# (72 < 75), so numeric_check is "consistent" instead of "not_applicable".
 def test_student_percentage_does_not_cause_contradiction():
     result = ClaimVerifier().verify_claim(
         "A student with 72% attendance does not meet the requirement "
         "for semester examinations.",
         [POLICY],
     )
-    assert result["numeric_check"] == "not_applicable"
     assert result["status"] != CONTRADICTED
+    assert result["numeric_check"] == "consistent"
+    assert result["eligibility_check"] == "consistent"
 
 
 def test_page_is_never_invented():
@@ -146,3 +153,143 @@ def test_overall_status():
     assert overall_status(make(SUPPORTED, UNVERIFIED)) == "partially_verified"
     assert overall_status(make(PARTIALLY_SUPPORTED)) == "partially_verified"
     assert overall_status(make(UNVERIFIED, UNVERIFIED)) == "unverified"
+
+
+# ---------------- new: student value extraction ----------------
+
+def test_student_values_extracted():
+    assert extract_student_values(
+        "A student with 72% attendance can write."
+    ) == [72.0]
+    assert extract_student_values(
+        "The student has an attendance of 60%."
+    ) == [60.0]
+
+
+def test_rule_numbers_are_not_student_values():
+    assert extract_student_values(
+        "The minimum attendance of 75% is required."
+    ) == []
+    assert extract_student_values("Students need 90% attendance.") == []
+
+
+# ---------------- new: eligibility verdict ----------------
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The student is not eligible for the exam.",
+        "A student cannot write the exam.",
+        "They can't appear for the exam.",
+        "The student does not meet the requirement.",
+        "The student is ineligible.",
+    ],
+)
+def test_negative_verdicts(text):
+    assert eligibility_verdict(text) == "ineligible"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The student is eligible for the exam.",
+        "A student can write the exam.",
+        "The student is allowed to appear.",
+    ],
+)
+def test_positive_verdicts(text):
+    assert eligibility_verdict(text) == "eligible"
+
+
+def test_no_or_mixed_verdict_is_none():
+    assert eligibility_verdict("Attendance is recorded daily.") is None
+    assert eligibility_verdict(
+        "The student cannot write but can appear."
+    ) is None
+
+
+# ---------------- new: eligibility arithmetic ----------------
+
+def test_eligible_claim_below_minimum_is_contradicted():
+    result = ClaimVerifier().verify_claim(
+        "Yes, a student with 72% attendance can write the semester "
+        "examination.",
+        [POLICY],
+    )
+    assert result["status"] == CONTRADICTED
+    assert result["method"] == "numeric"
+    assert result["eligibility_check"] == "conflict"
+    assert "72%" in result["reasons"][0] and "75%" in result["reasons"][0]
+    assert result["contradicting"][0]["version"] == "2.0"
+
+
+def test_fifty_percent_eligible_claim_is_contradicted():
+    result = ClaimVerifier().verify_claim(
+        "A student with 50% attendance can write the semester "
+        "examination.",
+        [POLICY],
+    )
+    assert result["status"] == CONTRADICTED
+
+
+def test_correct_ineligibility_claim_is_consistent():
+    result = ClaimVerifier().verify_claim(
+        "A student with 72% attendance cannot write the semester "
+        "examination.",
+        [POLICY],
+    )
+    assert result["status"] == PARTIALLY_SUPPORTED
+    assert result["eligibility_check"] == "consistent"
+    assert result["supporting"]
+
+
+def test_eligible_claim_above_minimum_is_consistent():
+    result = ClaimVerifier().verify_claim(
+        "A student with 80% attendance is eligible for the semester "
+        "examination.",
+        [POLICY],
+    )
+    assert result["status"] == PARTIALLY_SUPPORTED
+    assert result["eligibility_check"] == "consistent"
+
+
+def test_exactly_the_minimum_counts_as_eligible():
+    result = ClaimVerifier().verify_claim(
+        "A student with 75% attendance is eligible for the semester "
+        "examination.",
+        [POLICY],
+    )
+    assert result["status"] != CONTRADICTED
+    assert result["eligibility_check"] == "consistent"
+
+
+def test_exactly_the_minimum_cannot_be_called_ineligible():
+    result = ClaimVerifier().verify_claim(
+        "A student with 75% attendance cannot write the semester "
+        "examination.",
+        [POLICY],
+    )
+    assert result["status"] == CONTRADICTED
+
+
+def test_no_verdict_means_no_eligibility_check():
+    result = ClaimVerifier().verify_claim(
+        "A student with 72% attendance attended the semester class.",
+        [POLICY],
+    )
+    assert result["eligibility_check"] == "not_applicable"
+
+
+def test_several_different_minimums_is_not_decided():
+    other = {
+        "chunk_id": "other_1",
+        "title": "Other Policy",
+        "text": "The minimum attendance for semester students is 60%.",
+    }
+    result = ClaimVerifier().verify_claim(
+        "A student with 70% attendance can write the semester "
+        "examination.",
+        [POLICY, other],
+    )
+    assert result["eligibility_check"] == "ambiguous"
+    assert result["status"] != CONTRADICTED
