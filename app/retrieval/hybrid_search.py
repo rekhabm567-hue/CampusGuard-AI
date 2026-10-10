@@ -1,17 +1,66 @@
 # ============================================================
 # HYBRID SEARCH ENGINE
 # LLM HALLUCINATION FIREWALL
+#
+# Dense (FAISS) + lexical (BM25) retrieval, fused with
+# Reciprocal Rank Fusion (RRF). Chunks are identified by
+# source file + content hash, so identical text from two
+# different documents is never merged.
 # ============================================================
+
+import hashlib
 
 from app.retrieval.embeddings import EmbeddingEngine
 from app.retrieval.vector_store import VectorStore
 from app.retrieval.keyword_search import KeywordSearch
 
+RRF_K = 60
+
+_ENGINE_CACHE = {}
+
+
+def get_embedding_engine(model_name="all-MiniLM-L6-v2"):
+    """Load the embedding model once per process."""
+
+    if model_name not in _ENGINE_CACHE:
+        _ENGINE_CACHE[model_name] = EmbeddingEngine(model_name)
+
+    return _ENGINE_CACHE[model_name]
+
+
+def chunk_key(document):
+    """Stable identity: source file + chunk id/index + text hash."""
+
+    source = str(
+        document.get("file_path")
+        or document.get("title")
+        or ""
+    )
+
+    chunk_part = str(
+        document.get("chunk_id")
+        if document.get("chunk_id") is not None
+        else document.get("chunk_index", "")
+    )
+
+    text_hash = hashlib.sha256(
+        str(document.get("text", "")).encode("utf-8")
+    ).hexdigest()[:16]
+
+    return f"{source}|{chunk_part}|{text_hash}"
+
 
 class HybridSearch:
 
-    def __init__(self):
-        self.embedding_engine = EmbeddingEngine()
+    def __init__(
+        self,
+        embedding_engine=None,
+        rrf_k=RRF_K,
+        candidate_multiplier=3,
+    ):
+        self.embedding_engine = (
+            embedding_engine or get_embedding_engine()
+        )
 
         self.vector_store = VectorStore(
             self.embedding_engine.get_embedding_dimension()
@@ -19,24 +68,27 @@ class HybridSearch:
 
         self.keyword_search = KeywordSearch()
 
+        self.rrf_k = rrf_k
+        self.candidate_multiplier = candidate_multiplier
+
     def add_documents(self, documents):
         if not documents:
             return
+
+        documents = list(documents)
 
         texts = [
             document.get("text", "")
             for document in documents
         ]
 
-        embeddings = (
-            self.embedding_engine.encode_documents(
-                texts
-            )
+        embeddings = self.embedding_engine.encode_documents(
+            texts
         )
 
         self.vector_store.add_documents(
             documents,
-            embeddings
+            embeddings,
         )
 
         self.keyword_search.add_documents(
@@ -47,99 +99,81 @@ class HybridSearch:
         self,
         query,
         top_k=5,
-        semantic_weight=0.6,
-        keyword_weight=0.4
+        semantic_weight=1.0,
+        keyword_weight=1.0,
     ):
+        """Return the top_k chunks ranked by weighted RRF."""
+
         if not query or not query.strip():
             return []
 
-        semantic_results = self.vector_store.search(
-            self.embedding_engine.encode_text(query),
-            top_k=top_k
+        candidates = max(
+            int(top_k) * self.candidate_multiplier,
+            int(top_k),
         )
 
-        keyword_results = self.keyword_search.search(
-            query,
-            top_k=top_k
+        semantic_results = self.vector_store.search(
+            self.embedding_engine.encode_text(query),
+            top_k=candidates,
         )
+
+        keyword_results = [
+            result
+            for result in self.keyword_search.search(
+                query,
+                top_k=candidates,
+            )
+            # Zero BM25 score means no lexical match at all.
+            if result.get("keyword_score", 0.0) > 0
+        ]
 
         combined = {}
 
-        for result in semantic_results:
-            key = result.get("text", "")
+        def merge(results, rank_field, weight):
+            for rank, result in enumerate(results, start=1):
+                key = chunk_key(result)
 
-            combined[key] = {
-                **result,
-                "semantic_score": result.get(
-                    "semantic_score",
-                    0.0
-                ),
-                "keyword_score": 0.0,
-            }
-
-        for result in keyword_results:
-            key = result.get("text", "")
-
-            if key not in combined:
-                combined[key] = {
-                    **result,
-                    "semantic_score": 0.0,
-                    "keyword_score": 0.0,
-                }
-
-            combined[key]["keyword_score"] = (
-                result.get(
-                    "keyword_score",
-                    0.0
+                entry = combined.setdefault(
+                    key,
+                    {
+                        **result,
+                        "chunk_key": key,
+                        "semantic_score": 0.0,
+                        "keyword_score": 0.0,
+                        "semantic_rank": None,
+                        "keyword_rank": None,
+                        "rrf_score": 0.0,
+                    },
                 )
-            )
+
+                if "semantic_score" in result:
+                    entry["semantic_score"] = result["semantic_score"]
+
+                if "keyword_score" in result:
+                    entry["keyword_score"] = result["keyword_score"]
+
+                entry[rank_field] = rank
+                entry["rrf_score"] += weight / (self.rrf_k + rank)
+
+        merge(semantic_results, "semantic_rank", semantic_weight)
+        merge(keyword_results, "keyword_rank", keyword_weight)
 
         results = list(combined.values())
 
         if not results:
             return []
 
-        max_semantic = max(
-            result["semantic_score"]
-            for result in results
+        results.sort(
+            key=lambda result: result["rrf_score"],
+            reverse=True,
         )
 
-        max_keyword = max(
-            result["keyword_score"]
-            for result in results
-        )
+        # Scale to 0-1 so the existing reranker weights still make
+        # sense. Kept under the old field name for compatibility.
+        top_score = results[0]["rrf_score"] or 1.0
 
         for result in results:
-
-            if max_semantic > 0:
-                normalized_semantic = (
-                    result["semantic_score"]
-                    / max_semantic
-                )
-            else:
-                normalized_semantic = 0.0
-
-            if max_keyword > 0:
-                normalized_keyword = (
-                    result["keyword_score"]
-                    / max_keyword
-                )
-            else:
-                normalized_keyword = 0.0
-
-            result["hybrid_score"] = (
-                semantic_weight
-                * normalized_semantic
-                +
-                keyword_weight
-                * normalized_keyword
-            )
-
-        results.sort(
-            key=lambda result:
-            result["hybrid_score"],
-            reverse=True
-        )
+            result["hybrid_score"] = result["rrf_score"] / top_score
 
         return results[:top_k]
 
