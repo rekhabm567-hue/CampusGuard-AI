@@ -3,8 +3,13 @@
 # LLM HALLUCINATION FIREWALL
 # ============================================================
 
+import sqlite3
+
 from app.database.database import get_connection
 from app.core.security import hash_password
+
+
+VALID_ROLES = {"admin", "faculty", "student", "staff"}
 
 
 # ============================================================
@@ -18,9 +23,25 @@ def create_user(
     role,
     department=None,
 ):
-    connection = get_connection()
+    """Create a user.
 
-    password_hash = hash_password(password)
+    Returns True if created, False if the username already exists.
+    Raises ValueError for invalid input and re-raises unexpected
+    database errors.
+    """
+
+    username = (username or "").strip()
+
+    if not username:
+        raise ValueError("Username is required.")
+
+    if not password:
+        raise ValueError("Password is required.")
+
+    if role not in VALID_ROLES:
+        raise ValueError(f"Invalid role: {role}")
+
+    connection = get_connection()
 
     try:
 
@@ -37,7 +58,7 @@ def create_user(
             """,
             (
                 username,
-                password_hash,
+                hash_password(password),
                 full_name,
                 role,
                 department,
@@ -48,7 +69,7 @@ def create_user(
 
         return True
 
-    except Exception:
+    except sqlite3.IntegrityError:
 
         return False
 
