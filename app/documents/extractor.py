@@ -1,32 +1,57 @@
 from pathlib import Path
 
 from pypdf import PdfReader
+from pypdf.errors import PdfReadError
 from docx import Document
 
 
-def extract_pdf_text(file_path):
-    """
-    Extract text from a PDF document.
+def extract_pdf_pages(file_path):
+    """Return [{"page": n, "text": ...}] with real 1-based page numbers.
+
+    Pages without extractable text are skipped, but numbering is kept.
+    Raises ValueError for encrypted or malformed PDFs.
     """
 
-    reader = PdfReader(str(file_path))
+    try:
+        reader = PdfReader(str(file_path))
+    except PdfReadError as error:
+        raise ValueError(f"Malformed PDF: {error}") from error
+
+    if reader.is_encrypted:
+        try:
+            unlocked = reader.decrypt("")
+        except Exception as error:
+            raise ValueError(
+                "PDF is encrypted and cannot be read."
+            ) from error
+
+        if not unlocked:
+            raise ValueError("PDF is encrypted and cannot be read.")
 
     pages = []
 
-    for page in reader.pages:
+    try:
+        for number, page in enumerate(reader.pages, start=1):
+            text = (page.extract_text() or "").strip()
 
-        text = page.extract_text()
+            if text:
+                pages.append({"page": number, "text": text})
+    except PdfReadError as error:
+        raise ValueError(f"Malformed PDF: {error}") from error
 
-        if text:
-            pages.append(text)
+    return pages
 
-    return "\n\n".join(pages)
+
+def extract_pdf_text(file_path):
+    """Extract text from a PDF document (pages joined)."""
+
+    return "\n\n".join(
+        page["text"] for page in extract_pdf_pages(file_path)
+    )
 
 
 def extract_docx_text(file_path):
-    """
-    Extract text from a DOCX document.
-    """
+    """Extract text from a DOCX document."""
 
     document = Document(str(file_path))
 
@@ -43,9 +68,7 @@ def extract_docx_text(file_path):
 
 
 def extract_txt_text(file_path):
-    """
-    Extract text from a plain text document.
-    """
+    """Extract text from a plain text document."""
 
     return Path(file_path).read_text(
         encoding="utf-8"
@@ -53,10 +76,7 @@ def extract_txt_text(file_path):
 
 
 def extract_text(file_path):
-    """
-    Automatically select the correct
-    extractor based on file extension.
-    """
+    """Select the correct extractor based on file extension."""
 
     extension = Path(file_path).suffix.lower()
 
