@@ -51,6 +51,14 @@ STOP_WORDS = {
     "about", "how", "who", "which", "tell", "me", "please",
 }
 
+# Words that appear in almost every policy document. They alone do not
+# show that a document is about the question.
+GENERIC_WORDS = {
+    "policy", "policies", "employee", "employees", "rule", "rules",
+    "regulation", "regulations", "document", "documents", "college",
+    "section", "version",
+}
+
 
 def find_rule_conflicts(documents):
     """Stopgap conflict check.
@@ -149,6 +157,7 @@ class HallucinationFirewallPipeline:
         return self._verifier
 
     def _tokenize(self, text):
+        """Words minus stop words (generic words are kept)."""
 
         if not text:
             return set()
@@ -159,9 +168,17 @@ class HallucinationFirewallPipeline:
             if word not in STOP_WORDS
         }
 
+    def _meaningful_query_tokens(self, query):
+        """Query words minus generic ones; falls back to all if empty."""
+
+        tokens = self._tokenize(query)
+        meaningful = tokens - GENERIC_WORDS
+
+        return meaningful or tokens
+
     def _is_relevant_document(self, query, document):
 
-        query_tokens = self._tokenize(query)
+        query_tokens = self._meaningful_query_tokens(query)
 
         if not query_tokens:
             return False
@@ -174,7 +191,9 @@ class HallucinationFirewallPipeline:
         if query_tokens & self._tokenize(title):
             return True
 
-        return len(query_tokens & self._tokenize(text)) >= 2
+        needed = min(2, len(query_tokens))
+
+        return len(query_tokens & self._tokenize(text)) >= needed
 
     def _filter_relevant_evidence(self, query, documents):
 

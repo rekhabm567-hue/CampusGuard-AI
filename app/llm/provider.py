@@ -6,6 +6,14 @@
 import re
 from abc import ABC, abstractmethod
 
+# Words that appear in almost every policy document. A line that shares
+# only these with the question is not relevant.
+GENERIC_WORDS = {
+    "policy", "policies", "employee", "employees", "rule", "rules",
+    "regulation", "regulations", "document", "documents", "college",
+    "section", "version",
+}
+
 
 class LLMProvider(ABC):
 
@@ -270,15 +278,6 @@ class MockLLMProvider(LLMProvider):
 
         for line in lines:
 
-            # ------------------------------------------------
-            # Detect rule number.
-            #
-            # Examples:
-            # 1
-            # 2
-            # 10
-            # ------------------------------------------------
-
             number_match = re.fullmatch(
                 r"(\d{1,2})",
                 line
@@ -314,10 +313,7 @@ class MockLLMProvider(LLMProvider):
 
                 continue
 
-            # ------------------------------------------------
             # Ignore table headings.
-            # ------------------------------------------------
-
             if line.lower() in {
                 "no.",
                 "rule / regulation",
@@ -327,11 +323,7 @@ class MockLLMProvider(LLMProvider):
             }:
                 continue
 
-            # ------------------------------------------------
-            # If we have a rule number but no title,
-            # the next meaningful line is the title.
-            # ------------------------------------------------
-
+            # The next meaningful line after a number is the title.
             if (
                 current_number is not None
                 and current_title is None
@@ -347,10 +339,7 @@ class MockLLMProvider(LLMProvider):
                 current_title = line
                 continue
 
-            # ------------------------------------------------
             # Remaining lines belong to the description.
-            # ------------------------------------------------
-
             if (
                 current_number is not None
                 and current_title is not None
@@ -385,10 +374,7 @@ class MockLLMProvider(LLMProvider):
                 )
             )
 
-        # ----------------------------------------------------
         # Validate that these really look like rules.
-        # ----------------------------------------------------
-
         valid_rules = []
 
         for number, title, description in rules:
@@ -447,6 +433,14 @@ class MockLLMProvider(LLMProvider):
         if not query_tokens:
             return []
 
+        # Generic words alone do not make a line relevant.
+        meaningful = query_tokens - GENERIC_WORDS
+
+        if not meaningful:
+            meaningful = query_tokens
+
+        needed = min(2, len(meaningful))
+
         lines = [
             line.strip()
             for line in evidence.splitlines()
@@ -461,11 +455,12 @@ class MockLLMProvider(LLMProvider):
                 line
             )
 
-            overlap = (
-                query_tokens.intersection(
-                    line_tokens
-                )
+            overlap = meaningful.intersection(
+                line_tokens
             )
+
+            if len(overlap) < needed:
+                continue
 
             score = len(overlap)
 
@@ -499,15 +494,13 @@ class MockLLMProvider(LLMProvider):
             ):
                 score += 5
 
-            if score > 0:
-
-                candidates.append(
-                    (
-                        score,
-                        index,
-                        line
-                    )
+            candidates.append(
+                (
+                    score,
+                    index,
+                    line
                 )
+            )
 
         candidates.sort(
             key=lambda item: item[0],
@@ -545,10 +538,7 @@ class MockLLMProvider(LLMProvider):
 
         query_lower = query.lower()
 
-        # ----------------------------------------------------
         # Attendance
-        # ----------------------------------------------------
-
         if "attendance" in query_lower:
 
             for item in content:
@@ -567,10 +557,7 @@ class MockLLMProvider(LLMProvider):
                         f"{percentage.group(1)}%."
                     )
 
-        # ----------------------------------------------------
         # CGPA
-        # ----------------------------------------------------
-
         if "cgpa" in query_lower:
 
             for item in content:
@@ -581,17 +568,11 @@ class MockLLMProvider(LLMProvider):
                 ):
                     return item
 
-        # ----------------------------------------------------
         # Single result
-        # ----------------------------------------------------
-
         if len(content) == 1:
             return content[0]
 
-        # ----------------------------------------------------
         # Multiple results
-        # ----------------------------------------------------
-
         return (
             "According to the authorized "
             "enterprise evidence:\n\n"
