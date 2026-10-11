@@ -75,13 +75,15 @@ AUTHORIZED EVIDENCE:
 {evidence_text}
 
 INSTRUCTIONS:
-1. Answer the user's question directly.
-2. Base every factual claim on the authorized evidence.
-3. After each factual statement, cite its source as [1], [2] and so on,
+1. Answer the user's question directly in one to three short sentences.
+2. State each fact using the same wording as the evidence. Do not
+   rephrase, summarize or add framing words.
+3. Do not begin with phrases such as "According to the evidence",
+   "Based on the evidence" or "The policy states".
+4. After each sentence, cite its source as [1], [2] and so on,
    using only the evidence numbers shown above.
-4. Preserve important numbers, dates, requirements, and conditions.
-5. Do not expose internal retrieval or security details.
-6. Keep the answer concise and natural.
+5. Preserve important numbers, dates, requirements, and conditions.
+6. Do not expose internal retrieval or security details.
 """
 
         return prompt.strip()
