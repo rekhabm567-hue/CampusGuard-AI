@@ -22,3 +22,29 @@ def test_sentences_split_and_bullets_stripped():
 
 def test_empty_answer():
     assert ex.extract("  ") == []
+    
+
+def test_meta_lead_in_is_removed():
+    claims = ex.extract(
+        "According to the evidence, the employee leave policy requires "
+        "that planned leave be requested in advance."
+    )
+    assert claims == [
+        "The employee leave policy requires that planned leave be "
+        "requested in advance."
+    ]
+
+
+def test_lead_in_variants():
+    assert ex.extract("Based on the evidence, leave needs approval.") == [
+        "Leave needs approval."
+    ]
+    assert ex.extract("The documents state that leave needs approval.") == [
+        "Leave needs approval."
+    ]
+
+
+def test_plain_sentence_is_unchanged():
+    assert ex.extract("Leave needs approval from the manager.") == [
+        "Leave needs approval from the manager."
+    ]
