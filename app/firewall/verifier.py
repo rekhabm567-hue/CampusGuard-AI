@@ -3,8 +3,8 @@
 # LLM HALLUCINATION FIREWALL
 #
 # Statuses: supported, partially_supported, contradicted,
-# unverified. "supported" needs an entailment function (NLI
-# model); without one, word overlap alone never yields it.
+# unverified. "supported" needs either an entailment function
+# (NLI model) or the claim being quoted from the evidence.
 #
 # Deterministic checks:
 #   1. Percentage rules stated in a claim must match rules in
@@ -12,6 +12,8 @@
 #   2. A student's own value (e.g. 72%) compared with a single
 #      minimum rule must agree with the claim's eligibility
 #      verdict (value >= minimum means eligible).
+#   3. A claim whose words appear contiguously in one evidence
+#      chunk is supported by quotation.
 # ============================================================
 
 import re
@@ -163,6 +165,23 @@ def relevance(claim, chunk_text):
         return 0.0
 
     return len(claim_tokens & content_tokens(chunk_text)) / len(claim_tokens)
+
+
+def _norm(text):
+    return re.sub(r"[^a-z0-9% ]+", " ", str(text or "").lower()).split()
+
+
+def quoted_in(claim, document):
+    """True if the claim's words appear contiguously in the document."""
+
+    words = _norm(claim)
+
+    if len(words) < 4:
+        return False
+
+    haystack = " " + " ".join(_norm(document.get("text", ""))) + " "
+
+    return " " + " ".join(words) + " " in haystack
 
 
 def _sentences(text):
@@ -422,6 +441,21 @@ class ClaimVerifier:
                 student_values, verdict, evidence_values, result
             ):
                 return result
+
+        # ---------------- quotation from the evidence ----------------
+
+        if result["numeric_check"] in ("not_applicable", "consistent"):
+            for document, _ in relevant:
+                if quoted_in(claim, document):
+                    result["status"] = SUPPORTED
+                    result["method"] = "quotation"
+                    result["supporting"].append(
+                        _ref(document, _excerpt(document.get("text", "")))
+                    )
+                    result["reasons"].append(
+                        "The claim is stated in the evidence."
+                    )
+                    return result
 
         # ---------------- optional entailment model ----------------
 
