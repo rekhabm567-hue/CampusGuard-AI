@@ -293,3 +293,22 @@ def test_several_different_minimums_is_not_decided():
     )
     assert result["eligibility_check"] == "ambiguous"
     assert result["status"] != CONTRADICTED
+    
+
+def test_quoted_sentence_is_supported():
+    result = ClaimVerifier().verify_claim(
+        "The minimum attendance requirement for semester examinations "
+        "is 75%.",
+        [POLICY],
+    )
+    assert result["status"] == SUPPORTED
+    assert result["method"] == "quotation"
+
+
+def test_wrong_number_is_not_rescued_by_quotation():
+    result = ClaimVerifier().verify_claim(
+        "The minimum attendance requirement for semester examinations "
+        "is 90%.",
+        [POLICY],
+    )
+    assert result["status"] == CONTRADICTED
