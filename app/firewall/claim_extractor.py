@@ -13,15 +13,18 @@ import re
 
 _BULLET = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s*")
 
+_SOURCE = (
+    r"(?:the\s+)?(?:authorized\s+|provided\s+|given\s+)?"
+    r"(?:evidence|documents?|sources?|context|policy|text)"
+    r"(?:\s+(?:provided|given|above|available))?"
+)
+
 _LEAD_IN = re.compile(
     r"^\s*(?:"
-    r"according\s+to\s+(?:the\s+)?(?:authorized\s+|provided\s+)?"
-    r"(?:evidence|documents?|sources?|context|policy|text)"
-    r"(?:\s*\[\d+\])?"
-    r"|based\s+on\s+(?:the\s+)?(?:authorized\s+|provided\s+)?"
-    r"(?:evidence|documents?|sources?|context|text)"
+    rf"according\s+to\s+{_SOURCE}(?:\s*\[\d+\])?"
+    rf"|based\s+on\s+{_SOURCE}"
     r"|the\s+(?:evidence|documents?|sources?)\s+"
-    r"(?:states?|says?|indicates?|shows?)\s+that"
+    r"(?:states?|says?|indicates?|shows?)(?:\s+that)?"
     r")\s*[,:]?\s*",
     re.IGNORECASE,
 )

@@ -48,3 +48,13 @@ def test_plain_sentence_is_unchanged():
     assert ex.extract("Leave needs approval from the manager.") == [
         "Leave needs approval from the manager."
     ]
+
+
+def test_lead_in_with_trailing_provided():
+    claims = ex.extract(
+        "Based on the evidence provided, a student with 72% attendance "
+        "does not meet the minimum."
+    )
+    assert claims == [
+        "A student with 72% attendance does not meet the minimum."
+    ]
