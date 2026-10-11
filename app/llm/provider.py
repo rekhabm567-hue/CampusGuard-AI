@@ -14,6 +14,9 @@ GENERIC_WORDS = {
     "section", "version",
 }
 
+MAX_SENTENCES = 3
+MAX_SENTENCE_CHARS = 300
+
 
 class LLMProvider(ABC):
 
@@ -33,15 +36,9 @@ class LLMProvider(ABC):
 
 class MockLLMProvider(LLMProvider):
     """
-    Evidence-based local answer generator.
+    Evidence-based local answer generator (not a language model).
 
-    This version is designed to handle:
-    - Normal document questions
-    - Attendance questions
-    - Employee rules tables
-    - Numbered rules
-    - Multi-line PDF extraction
-    - Removal of retrieval metadata
+    It copies the most relevant short sentences from the evidence.
     """
 
     name = "mock-evidence-extractor"
@@ -170,6 +167,9 @@ class MockLLMProvider(LLMProvider):
             if lower.startswith("section:"):
                 continue
 
+            if lower.startswith("page:"):
+                continue
+
             if "evidence match score" in lower:
                 continue
 
@@ -198,36 +198,10 @@ class MockLLMProvider(LLMProvider):
         )
 
         stop_words = {
-            "what",
-            "is",
-            "are",
-            "the",
-            "a",
-            "an",
-            "of",
-            "to",
-            "for",
-            "in",
-            "on",
-            "and",
-            "or",
-            "can",
-            "could",
-            "would",
-            "should",
-            "does",
-            "do",
-            "this",
-            "that",
-            "with",
-            "be",
-            "about",
-            "how",
-            "who",
-            "which",
-            "tell",
-            "me",
-            "please",
+            "what", "is", "are", "the", "a", "an", "of", "to", "for",
+            "in", "on", "and", "or", "can", "could", "would", "should",
+            "does", "do", "this", "that", "with", "be", "about", "how",
+            "who", "which", "tell", "me", "please",
         }
 
         return {
@@ -285,35 +259,26 @@ class MockLLMProvider(LLMProvider):
 
             if number_match:
 
-                # Save previous rule.
                 if (
                     current_number is not None
                     and current_title
                     and current_description
                 ):
 
-                    description = " ".join(
-                        current_description
-                    )
-
                     rules.append(
                         (
                             current_number,
                             current_title,
-                            description
+                            " ".join(current_description),
                         )
                     )
 
-                current_number = (
-                    number_match.group(1)
-                )
-
+                current_number = number_match.group(1)
                 current_title = None
                 current_description = []
 
                 continue
 
-            # Ignore table headings.
             if line.lower() in {
                 "no.",
                 "rule / regulation",
@@ -323,13 +288,11 @@ class MockLLMProvider(LLMProvider):
             }:
                 continue
 
-            # The next meaningful line after a number is the title.
             if (
                 current_number is not None
                 and current_title is None
             ):
 
-                # Avoid document title.
                 if line.lower() in {
                     "employee rules and regulations",
                     "10 sample workplace rules arranged in serial order for testing",
@@ -339,42 +302,30 @@ class MockLLMProvider(LLMProvider):
                 current_title = line
                 continue
 
-            # Remaining lines belong to the description.
             if (
                 current_number is not None
                 and current_title is not None
             ):
 
-                # Stop at testing note.
-                if line.lower().startswith(
-                    "testing note"
-                ):
+                if line.lower().startswith("testing note"):
                     break
 
-                current_description.append(
-                    line
-                )
+                current_description.append(line)
 
-        # Save final rule.
         if (
             current_number is not None
             and current_title
             and current_description
         ):
 
-            description = " ".join(
-                current_description
-            )
-
             rules.append(
                 (
                     current_number,
                     current_title,
-                    description
+                    " ".join(current_description),
                 )
             )
 
-        # Validate that these really look like rules.
         valid_rules = []
 
         for number, title, description in rules:
@@ -385,13 +336,7 @@ class MockLLMProvider(LLMProvider):
             if len(description) < 10:
                 continue
 
-            valid_rules.append(
-                (
-                    number,
-                    title,
-                    description
-                )
-            )
+            valid_rules.append((number, title, description))
 
         return valid_rules[:10]
 
@@ -412,9 +357,26 @@ class MockLLMProvider(LLMProvider):
                 f"{number}. {title} — {description}"
             )
 
-        return "\n\n".join(
-            answer_lines
+        return "\n\n".join(answer_lines)
+
+    # ========================================================
+    # SENTENCE SPLITTING
+    # ========================================================
+
+    def _sentences(self, text):
+        """Split on sentence ends, not after abbreviations or numbers."""
+
+        protected = re.sub(
+            r"(?i)\b(ch|e\.g|i\.e|etc|vs|no|fig|eq|dr|mr|mrs|ms|prof|sec)"
+            r"\.(\s)",
+            "\\1\u0001\\2",
+            text,
         )
+        protected = re.sub(r"(\d)\.(\s)", "\\1\u0001\\2", protected)
+
+        parts = re.split(r"(?<=[.!?])\s+", protected)
+
+        return [p.replace("\u0001", ".").strip() for p in parts if p.strip()]
 
     # ========================================================
     # GENERAL RELEVANT CONTENT
@@ -425,15 +387,13 @@ class MockLLMProvider(LLMProvider):
         query,
         evidence
     ):
+        """Up to MAX_SENTENCES short sentences, best overlap first."""
 
-        query_tokens = self._tokenize(
-            query
-        )
+        query_tokens = self._tokenize(query)
 
         if not query_tokens:
             return []
 
-        # Generic words alone do not make a line relevant.
         meaningful = query_tokens - GENERIC_WORDS
 
         if not meaningful:
@@ -441,87 +401,53 @@ class MockLLMProvider(LLMProvider):
 
         needed = min(2, len(meaningful))
 
-        lines = [
-            line.strip()
-            for line in evidence.splitlines()
-            if line.strip()
-        ]
+        query_lower = query.lower()
 
         candidates = []
+        position = 0
 
-        for index, line in enumerate(lines):
+        for line in evidence.splitlines():
 
-            line_tokens = self._tokenize(
-                line
-            )
+            for sentence in self._sentences(line.strip()):
 
-            overlap = meaningful.intersection(
-                line_tokens
-            )
+                position += 1
 
-            if len(overlap) < needed:
-                continue
+                if (
+                    len(sentence) > MAX_SENTENCE_CHARS
+                    or len(re.findall(r"[A-Za-z]{2,}", sentence)) < 3
+                ):
+                    continue
 
-            score = len(overlap)
+                overlap = meaningful & self._tokenize(sentence)
 
-            query_lower = query.lower()
-            line_lower = line.lower()
+                if len(overlap) < needed:
+                    continue
 
-            if (
-                "attendance" in query_lower
-                and "attendance" in line_lower
-            ):
-                score += 5
+                score = len(overlap)
+                lower = sentence.lower()
 
-            if (
-                "exam" in query_lower
-                and (
-                    "exam" in line_lower
-                    or "examination" in line_lower
-                )
-            ):
-                score += 5
+                for word in ("attendance", "exam", "leave", "cgpa"):
+                    if word in query_lower and word in lower:
+                        score += 5
 
-            if (
-                "leave" in query_lower
-                and "leave" in line_lower
-            ):
-                score += 5
+                candidates.append((score, position, sentence))
 
-            if (
-                "cgpa" in query_lower
-                and "cgpa" in line_lower
-            ):
-                score += 5
-
-            candidates.append(
-                (
-                    score,
-                    index,
-                    line
-                )
-            )
-
-        candidates.sort(
-            key=lambda item: item[0],
-            reverse=True
-        )
+        candidates.sort(key=lambda item: (-item[0], item[1]))
 
         selected = []
         seen = set()
 
-        for score, index, line in candidates:
+        for score, position, sentence in candidates:
 
-            normalized = line.lower()
+            key = sentence.lower()
 
-            if normalized in seen:
+            if key in seen:
                 continue
 
-            seen.add(normalized)
+            seen.add(key)
+            selected.append(sentence)
 
-            selected.append(line)
-
-            if len(selected) >= 5:
+            if len(selected) >= MAX_SENTENCES:
                 break
 
         return selected
@@ -562,17 +488,12 @@ class MockLLMProvider(LLMProvider):
 
             for item in content:
 
-                if re.search(
-                    r"\d+(?:\.\d+)?",
-                    item
-                ):
+                if re.search(r"\d+(?:\.\d+)?", item):
                     return item
 
-        # Single result
         if len(content) == 1:
             return content[0]
 
-        # Multiple results
         return (
             "According to the authorized "
             "enterprise evidence:\n\n"

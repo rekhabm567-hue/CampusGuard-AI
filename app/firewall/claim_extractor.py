@@ -3,12 +3,40 @@
 # LLM HALLUCINATION FIREWALL
 #
 # Splits an answer into verifiable claims. Header lines (ending
-# with a colon) and bare bullet markers are not claims.
+# with a colon), bare bullet markers and fragments are not claims.
+# No split after common abbreviations or numbering such as "4.1".
 # ============================================================
 
 import re
 
 _BULLET = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s*")
+
+_ABBREVIATIONS = (
+    "ch", "e.g", "i.e", "etc", "vs", "no", "fig", "eq", "dr", "mr",
+    "mrs", "ms", "prof", "sec", "approx", "cf", "al",
+)
+
+_PROTECT = "\u0001"
+
+
+def _split_sentences(line):
+    """Split on . ! ? followed by space, except after abbreviations
+    or a bare number."""
+
+    protected = line
+
+    for abbr in _ABBREVIATIONS:
+        protected = re.sub(
+            rf"(?i)\b({re.escape(abbr)})\.(\s)",
+            rf"\1{_PROTECT}\2",
+            protected,
+        )
+
+    protected = re.sub(r"(\d)\.(\s)", rf"\1{_PROTECT}\2", protected)
+
+    parts = re.split(r"(?<=[.!?])\s+", protected)
+
+    return [part.replace(_PROTECT, ".") for part in parts]
 
 
 class ClaimExtractor:
@@ -37,7 +65,7 @@ class ClaimExtractor:
             if not line:
                 continue
 
-            for sentence in re.split(r"(?<=[.!?])\s+", line):
+            for sentence in _split_sentences(line):
 
                 sentence = _BULLET.sub("", sentence).strip()
 
