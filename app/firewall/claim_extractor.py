@@ -5,11 +5,26 @@
 # Splits an answer into verifiable claims. Header lines (ending
 # with a colon), bare bullet markers and fragments are not claims.
 # No split after common abbreviations or numbering such as "4.1".
+# Meta lead-ins such as "According to the evidence," are removed
+# because they are not part of the claim itself.
 # ============================================================
 
 import re
 
 _BULLET = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s*")
+
+_LEAD_IN = re.compile(
+    r"^\s*(?:"
+    r"according\s+to\s+(?:the\s+)?(?:authorized\s+|provided\s+)?"
+    r"(?:evidence|documents?|sources?|context|policy|text)"
+    r"(?:\s*\[\d+\])?"
+    r"|based\s+on\s+(?:the\s+)?(?:authorized\s+|provided\s+)?"
+    r"(?:evidence|documents?|sources?|context|text)"
+    r"|the\s+(?:evidence|documents?|sources?)\s+"
+    r"(?:states?|says?|indicates?|shows?)\s+that"
+    r")\s*[,:]?\s*",
+    re.IGNORECASE,
+)
 
 _ABBREVIATIONS = (
     "ch", "e.g", "i.e", "etc", "vs", "no", "fig", "eq", "dr", "mr",
@@ -37,6 +52,17 @@ def _split_sentences(line):
     parts = re.split(r"(?<=[.!?])\s+", protected)
 
     return [part.replace(_PROTECT, ".") for part in parts]
+
+
+def strip_lead_in(sentence):
+    """Remove a meta lead-in and re-capitalise the first letter."""
+
+    stripped = _LEAD_IN.sub("", sentence, count=1).strip()
+
+    if stripped and stripped != sentence.strip():
+        return stripped[0].upper() + stripped[1:]
+
+    return sentence.strip()
 
 
 class ClaimExtractor:
@@ -74,6 +100,8 @@ class ClaimExtractor:
 
                 if sentence.endswith(":"):
                     continue
+
+                sentence = strip_lead_in(sentence)
 
                 if len(re.findall(r"[A-Za-z]{2,}", sentence)) < 2:
                     continue
