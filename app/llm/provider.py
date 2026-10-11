@@ -509,5 +509,11 @@ class MockLLMProvider(LLMProvider):
 # ============================================================
 
 def create_llm_provider():
+    import os
+
+    if os.getenv("LLM_PROVIDER", "mock").lower() == "ollama":
+        from app.llm.ollama_provider import OllamaProvider
+
+        return OllamaProvider()
 
     return MockLLMProvider()
