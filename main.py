@@ -1,9 +1,11 @@
 import hashlib
 import html
+import json
 import re
 from datetime import date
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -14,9 +16,11 @@ from app.auth.authorization import (
     can_access_document,
     can_manage_documents,
     can_upload_document,
+    can_view_audit_logs,
 )
 from app.core.pipeline import create_firewall_pipeline
-from app.database.audit_log import log_event
+from app.database import feedback as fb
+from app.database.audit_log import get_recent_events, log_event
 from app.database.database import initialize_database
 from app.documents.chunker import create_document_chunks
 from app.documents.loader import load_document
@@ -30,23 +34,30 @@ from app.documents.registry import (
 )
 
 # ============================================================
-# PAGE CONFIGURATION
+# PAGE SETUP
 # ============================================================
 
 st.set_page_config(
-    page_title="CampusGuard AI",
+    page_title="Hallucination Firewall",
     page_icon="🛡️",
     layout="wide",
 )
 
 initialize_database()
 initialize_registry()
+fb.init_tables()
 
 if "user" not in st.session_state:
     st.session_state.user = None
 
 if "upload_key" not in st.session_state:
     st.session_state.upload_key = 0
+
+if "last" not in st.session_state:
+    st.session_state.last = None
+
+if "feedback_done" not in st.session_state:
+    st.session_state.feedback_done = set()
 
 DOCUMENT_DIRECTORY = Path("data") / "documents"
 DOCUMENT_DIRECTORY.mkdir(parents=True, exist_ok=True)
@@ -60,15 +71,9 @@ DEPARTMENTS = [
 ]
 
 DOCUMENT_TYPES = [
-    "Academic Policy",
-    "Attendance Policy",
-    "Examination Rule",
-    "Employee Leave Policy",
-    "Employee Rules",
-    "Student Leave Policy",
-    "Department Guideline",
-    "Student Handbook",
-    "Faculty Guideline",
+    "Academic Policy", "Attendance Policy", "Examination Rule",
+    "Employee Leave Policy", "Employee Rules", "Student Leave Policy",
+    "Department Guideline", "Student Handbook", "Faculty Guideline",
     "Administrative Document",
 ]
 
@@ -80,16 +85,39 @@ DEFAULT_ROLES = {
     "Student Handbook": ["student", "faculty", "staff"],
 }
 
+EXAMPLES = {
+    "student": [
+        "What is the minimum attendance for semester exams?",
+        "Can a student with 72% attendance write the semester exam?",
+        "Which experiment covers Docker containers?",
+    ],
+    "faculty": [
+        "What is the employee leave policy?",
+        "What should employees do about workplace hazards?",
+        "What is the minimum attendance for semester exams?",
+    ],
+    "staff": [
+        "What is the employee leave policy?",
+        "How should planned leave be requested?",
+        "What should employees do about workplace hazards?",
+    ],
+    "admin": [
+        "What is the minimum attendance for semester exams?",
+        "What is the employee leave policy?",
+        "Which experiment covers Docker containers?",
+    ],
+}
+
 CLAIM_BADGES = {
     "supported": ("#16a34a", "Supported"),
-    "partially_supported": ("#d97706", "Partially supported"),
+    "partially_supported": ("#ea580c", "Partially supported"),
     "contradicted": ("#dc2626", "Contradicted"),
     "unverified": ("#6b7280", "Unverified"),
 }
 
 STATUS_BADGES = {
     "VERIFIED": ("#16a34a", "✔ VERIFIED"),
-    "PARTIALLY VERIFIED": ("#d97706", "◐ PARTIALLY VERIFIED"),
+    "PARTIALLY VERIFIED": ("#ea580c", "◐ PARTIALLY VERIFIED"),
     "AMBIGUOUS": ("#ea580c", "? AMBIGUOUS"),
     "ACCESS DENIED": ("#dc2626", "✖ ACCESS DENIED"),
     "BLOCKED": ("#dc2626", "✖ BLOCKED"),
@@ -102,51 +130,48 @@ STATUS_BADGES = {
 st.markdown(
     """
     <style>
-    .block-container {max-width: 1100px; padding-top: 1rem;}
+    .block-container {max-width: 1100px; padding-top: 1.2rem;}
     header[data-testid="stHeader"] {background: transparent;}
 
-    .topbar {
-        display:flex; align-items:center; justify-content:space-between;
-        background:#ffffff; border:1px solid #e3e8f2; border-radius:14px;
-        padding:12px 20px; margin-bottom:16px;
-        box-shadow:0 1px 3px rgba(15,27,61,0.06);
+    section[data-testid="stSidebar"] {background: #0b0b10;}
+    section[data-testid="stSidebar"] * {color: #e4e4e7 !important;}
+    section[data-testid="stSidebar"] .stButton button {
+        background: #1f1f2a; border: 1px solid #3f3f46;
     }
-    .brand {font-size:20px; font-weight:700; color:#0f1b3d;}
-    .brand span {color:#14b8a6;}
-    .userchip {font-size:14px; color:#475569;}
+
+    .brand {font-size: 17px; font-weight: 700; margin-bottom: 14px;}
+    .brand span {color: #a78bfa;}
 
     .hero {
-        background:linear-gradient(135deg,#0f1b3d 0%,#1e2f66 55%,#0e7490 100%);
-        border-radius:18px; padding:36px 28px; text-align:center;
-        margin-bottom:22px;
+        background: #0b0b10; border-radius: 16px; padding: 26px 26px;
+        margin-bottom: 18px;
     }
-    .hero h1 {color:#ffffff; font-size:34px; margin:0 0 8px 0;}
-    .hero p {color:#cbd5e1; font-size:16px; margin:0;}
+    .hero h1 {color: #ffffff; font-size: 28px; margin: 0 0 6px 0;}
+    .hero h1 span {color: #a78bfa;}
+    .hero p {color: #a1a1aa; font-size: 15px; margin: 0;}
 
     .pill {
-        display:inline-block; color:#fff; font-weight:700; font-size:14px;
-        padding:6px 16px; border-radius:999px; margin:6px 0;
+        display: inline-block; color: #fff; font-weight: 700; font-size: 14px;
+        padding: 6px 16px; border-radius: 999px; margin: 6px 0;
     }
     .claim-pill {
-        display:inline-block; color:#fff; font-weight:600; font-size:12px;
-        padding:2px 10px; border-radius:999px;
+        display: inline-block; color: #fff; font-weight: 600; font-size: 12px;
+        padding: 2px 10px; border-radius: 999px;
     }
-    .doc-row {
-        padding:10px 4px; border-bottom:1px solid #eef1f7; color:#0f1b3d;
-    }
-    .doc-meta {color:#64748b; font-size:13px;}
+    .doc-row {padding: 10px 4px; border-bottom: 1px solid #ece9f5;}
+    .doc-meta {color: #6b6b76; font-size: 13px;}
     div[data-testid="stVerticalBlockBorderWrapper"] {
-        background:#ffffff; border-radius:14px;
+        background: #ffffff; border-radius: 14px;
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-
 # ============================================================
 # HELPERS
 # ============================================================
+
 
 @st.cache_resource(show_spinner="Loading verification models...")
 def get_pipeline():
@@ -159,10 +184,6 @@ def esc(value):
 
 def sha256_bytes(data):
     return hashlib.sha256(data).hexdigest()
-
-
-def sha256_file(path):
-    return sha256_bytes(Path(path).read_bytes())
 
 
 def safe_filename(name):
@@ -181,7 +202,7 @@ def find_duplicate(file_hash):
             path = Path(entry.get("file_path") or "")
 
             if path.is_file():
-                stored = sha256_file(path)
+                stored = sha256_bytes(path.read_bytes())
 
         if stored == file_hash:
             return entry
@@ -248,12 +269,25 @@ def set_document_status(file_path, status, username):
     log_event("document_status", username, f"{file_path} -> {status}")
 
 
+def set_query(text):
+    st.session_state["query_text"] = text
+
+
+def require(allowed, message):
+    """Server-side page guard: stop rendering if not allowed."""
+
+    if not allowed:
+        st.error(message)
+        st.stop()
+
+
 load_default_demo_document()
 
 
 # ============================================================
 # RESULT RENDERING
 # ============================================================
+
 
 def render_banner(status):
     color, label = STATUS_BADGES.get(status, STATUS_BADGES["BLOCKED"])
@@ -357,7 +391,37 @@ def render_claims(result):
                 )
 
 
-def render_result(result, user):
+def render_feedback(history_id, user):
+
+    if history_id in st.session_state.feedback_done:
+        st.caption("Thanks for your feedback.")
+        return
+
+    with st.container(border=True):
+
+        st.markdown("**Was this answer helpful?**")
+
+        comment = st.text_input(
+            "Comment (optional)",
+            key=f"fbc_{history_id}",
+            max_chars=500,
+        )
+
+        c1, c2, _ = st.columns([1, 1, 4])
+
+        for column, rating, label in (
+            (c1, 1, "👍 Helpful"),
+            (c2, -1, "👎 Not helpful"),
+        ):
+            if column.button(label, key=f"fb_{rating}_{history_id}"):
+                if fb.save_feedback(
+                    history_id, user["username"], rating, comment
+                ):
+                    st.session_state.feedback_done.add(history_id)
+                    st.rerun()
+
+
+def render_result(result, user, history_id):
     status = result.get("status", "BLOCKED")
 
     with st.container(border=True):
@@ -400,37 +464,21 @@ def render_result(result, user):
         with st.expander("Withheld draft answer (admin only)"):
             st.write(result["rejected_answer"])
 
+    if history_id is not None:
+        render_feedback(history_id, user)
+
 
 # ============================================================
-# LOGIN PAGE
+# LOGIN
 # ============================================================
-
-def render_topbar(user=None):
-    chip = ""
-
-    if user:
-        chip = (
-            f'<div class="userchip">{esc(user["full_name"])} • '
-            f'{esc(user["role"].title())}'
-            + (f' • {esc(user["department"])}' if user["department"] else "")
-            + "</div>"
-        )
-
-    st.markdown(
-        '<div class="topbar"><div class="brand">🛡️ Campus<span>Guard</span> '
-        f"AI</div>{chip}</div>",
-        unsafe_allow_html=True,
-    )
-
 
 if st.session_state.user is None:
 
-    render_topbar()
-
     st.markdown(
-        '<div class="hero"><h1>LLM Hallucination Firewall</h1>'
-        "<p>Evidence-grounded answers from your college policy documents, "
-        "verified before you see them.</p></div>",
+        '<div class="hero"><h1>🛡️ Hallucination <span>Firewall</span></h1>'
+        "<p>Answers you can trust, straight from your college documents. "
+        "Every answer is checked, and you only see what your role "
+        "allows.</p></div>",
         unsafe_allow_html=True,
     )
 
@@ -439,7 +487,7 @@ if st.session_state.user is None:
     with middle:
         with st.container(border=True):
 
-            st.subheader("Secure sign in")
+            st.subheader("Welcome back")
 
             username = st.text_input(
                 "Username", placeholder="Enter your username"
@@ -459,10 +507,10 @@ if st.session_state.user is None:
                     st.warning("Please enter both username and password.")
 
                 else:
-                    user = authenticate_user(username.strip(), password)
+                    found = authenticate_user(username.strip(), password)
 
-                    if user:
-                        st.session_state.user = dict(user)
+                    if found:
+                        st.session_state.user = dict(found)
                         st.rerun()
                     else:
                         st.error("Invalid username or password.")
@@ -471,268 +519,517 @@ if st.session_state.user is None:
 
 
 # ============================================================
-# MAIN APPLICATION
+# SIDEBAR AND NAVIGATION
 # ============================================================
 
 user = st.session_state.user
+role = user["role"].lower()
 
-render_topbar(user)
+pages = ["Ask", "Documents", "History"]
 
-_, sign_out_col = st.columns([5, 1])
+if can_manage_documents(user):
+    pages += ["Review", "Evaluation"]
 
-with sign_out_col:
+if can_view_audit_logs(user):
+    pages += ["Audit log"]
+
+with st.sidebar:
+    st.markdown(
+        '<div class="brand">🛡️ Hallucination <span>Firewall</span></div>',
+        unsafe_allow_html=True,
+    )
+
+    page = st.radio("Navigation", pages, label_visibility="collapsed")
+
+    st.write("")
+    st.caption(
+        f"{user['full_name']}\n\n"
+        f"{user['role'].title()}"
+        + (f" • {user['department']}" if user["department"] else "")
+    )
+
     if st.button("Sign out", use_container_width=True):
         st.session_state.user = None
+        st.session_state.last = None
         st.rerun()
 
-st.markdown(
-    '<div class="hero"><h1>Ask your college documents</h1>'
-    "<p>You only see answers from documents your role is allowed to "
-    "access.</p></div>",
-    unsafe_allow_html=True,
-)
 
+# ============================================================
+# PAGE: ASK
+# ============================================================
 
-# ------------------------------------------------------------
-# KNOWLEDGE SEARCH
-# ------------------------------------------------------------
+if page == "Ask":
 
-with st.container(border=True):
-
-    st.markdown("### Ask a question")
-
-    query = st.text_area(
-        "Ask a question",
-        placeholder=(
-            "Example: Can a 2nd year CSE student with 72% attendance "
-            "write the 2026 semester exam?"
-        ),
-        height=100,
-        label_visibility="collapsed",
+    st.markdown(
+        '<div class="hero"><h1>Ask your college <span>documents</span></h1>'
+        "<p>You only see answers from documents your role is allowed to "
+        "access.</p></div>",
+        unsafe_allow_html=True,
     )
 
-    ask = st.button(
-        "🔎 Verify answer", type="primary", use_container_width=True
-    )
+    with st.container(border=True):
 
-if ask:
+        st.markdown("### Ask a question")
 
-    if not query.strip():
-        st.warning("Please enter a question.")
+        query = st.text_area(
+            "Ask a question",
+            key="query_text",
+            placeholder=(
+                "Example: Can a 2nd year CSE student with 72% attendance "
+                "write the 2026 semester exam?"
+            ),
+            height=100,
+            label_visibility="collapsed",
+        )
 
-    else:
-        with st.spinner(
-            "Searching authorized evidence and verifying the answer..."
-        ):
-            result = get_pipeline().process_query(
-                user, query, load_enterprise_documents()
+        st.caption("Try an example:")
+        columns = st.columns(3)
+
+        for column, example in zip(columns, EXAMPLES.get(role, [])):
+            column.button(
+                example,
+                key=f"ex_{example}",
+                on_click=set_query,
+                args=(example,),
+                use_container_width=True,
             )
 
-        render_result(result, user)
+        ask = st.button(
+            "🔎 Verify answer", type="primary", use_container_width=True
+        )
 
-st.write("")
+    if ask:
+
+        if not query.strip():
+            st.warning("Please enter a question.")
+
+        else:
+            with st.spinner(
+                "Searching authorized evidence and verifying the answer..."
+            ):
+                result = get_pipeline().process_query(
+                    user, query, load_enterprise_documents()
+                )
+
+            history_id = fb.save_query(
+                user["username"],
+                query,
+                result.get("answer"),
+                result.get("status"),
+            )
+
+            st.session_state.last = {
+                "result": result,
+                "history_id": history_id,
+            }
+
+    if st.session_state.last:
+        render_result(
+            st.session_state.last["result"],
+            user,
+            st.session_state.last["history_id"],
+        )
 
 
-# ------------------------------------------------------------
-# DOCUMENT UPLOAD
-# ------------------------------------------------------------
+# ============================================================
+# PAGE: DOCUMENTS
+# ============================================================
 
-with st.container(border=True):
+elif page == "Documents":
 
-    st.markdown("### 📄 Document management")
+    st.markdown("## 📚 Documents")
 
     if can_upload_document(user):
 
-        st.caption(
-            "Uploaded documents are saved as drafts and are not searchable "
-            "until an administrator approves them."
-        )
+        with st.container(border=True):
 
-        uploaded_file = st.file_uploader(
-            "Upload PDF, DOCX or TXT (max 10 MB)",
-            type=["pdf", "docx", "txt"],
-            key=f"uploader_{st.session_state.upload_key}",
-        )
-
-        if uploaded_file is not None:
-
-            c1, c2, c3 = st.columns(3)
-
-            with c1:
-                department = st.selectbox("Department", DEPARTMENTS)
-
-            with c2:
-                document_type = st.selectbox(
-                    "Document type", DOCUMENT_TYPES
-                )
-
-            with c3:
-                academic_year = st.number_input(
-                    "Academic year", min_value=2020, max_value=2100,
-                    value=2026, step=1,
-                )
-
-            c4, c5 = st.columns(2)
-
-            with c4:
-                version = st.text_input("Policy version", value="1.0")
-
-            with c5:
-                effective_date = st.date_input(
-                    "Effective date", value=date.today()
-                )
-
-            allowed_roles = st.multiselect(
-                "Who can access this document?",
-                ["student", "faculty", "staff"],
-                default=DEFAULT_ROLES.get(
-                    document_type, ["student", "faculty", "staff"]
-                ),
-                key=f"roles_{document_type}",
+            st.markdown("### Upload a document")
+            st.caption(
+                "Uploaded documents are saved as drafts and are not "
+                "searchable until an administrator approves them."
             )
 
-            if document_type.startswith("Employee"):
-                st.caption(
-                    "Tip: employee documents usually use department "
-                    "'Administration' so they apply college-wide."
+            uploaded_file = st.file_uploader(
+                "Upload PDF, DOCX or TXT (max 10 MB)",
+                type=["pdf", "docx", "txt"],
+                key=f"uploader_{st.session_state.upload_key}",
+            )
+
+            if uploaded_file is not None:
+
+                c1, c2, c3 = st.columns(3)
+
+                with c1:
+                    department = st.selectbox("Department", DEPARTMENTS)
+
+                with c2:
+                    document_type = st.selectbox(
+                        "Document type", DOCUMENT_TYPES
+                    )
+
+                with c3:
+                    academic_year = st.number_input(
+                        "Academic year", min_value=2020, max_value=2100,
+                        value=2026, step=1,
+                    )
+
+                c4, c5 = st.columns(2)
+
+                with c4:
+                    version = st.text_input("Policy version", value="1.0")
+
+                with c5:
+                    effective_date = st.date_input(
+                        "Effective date", value=date.today()
+                    )
+
+                allowed_roles = st.multiselect(
+                    "Who can access this document?",
+                    ["student", "faculty", "staff"],
+                    default=DEFAULT_ROLES.get(
+                        document_type, ["student", "faculty", "staff"]
+                    ),
+                    key=f"roles_{document_type}",
                 )
 
-            if st.button(
-                "⬆️ Add document as draft",
-                type="primary",
-                use_container_width=True,
-            ):
+                if document_type.startswith("Employee"):
+                    st.caption(
+                        "Tip: employee documents usually use department "
+                        "'Administration' so they apply college-wide."
+                    )
 
-                data = uploaded_file.getvalue()
-                extension = Path(uploaded_file.name).suffix.lower()
+                if st.button(
+                    "⬆️ Add document as draft",
+                    type="primary",
+                    use_container_width=True,
+                ):
 
-                if extension not in ALLOWED_EXTENSIONS:
-                    st.error("Unsupported file type.")
+                    data = uploaded_file.getvalue()
+                    extension = Path(uploaded_file.name).suffix.lower()
 
-                elif len(data) > MAX_UPLOAD_BYTES:
-                    st.error("File is larger than 10 MB.")
+                    if extension not in ALLOWED_EXTENSIONS:
+                        st.error("Unsupported file type.")
 
-                elif not data:
-                    st.error("The file is empty.")
+                    elif len(data) > MAX_UPLOAD_BYTES:
+                        st.error("File is larger than 10 MB.")
 
-                elif not allowed_roles:
-                    st.error("Choose at least one role.")
+                    elif not data:
+                        st.error("The file is empty.")
 
-                else:
-                    file_hash = sha256_bytes(data)
-                    duplicate = find_duplicate(file_hash)
-
-                    if duplicate:
-                        st.warning(
-                            "This file is already registered as "
-                            f"'{duplicate.get('title')}'. Nothing was added."
-                        )
+                    elif not allowed_roles:
+                        st.error("Choose at least one role.")
 
                     else:
-                        name = safe_filename(uploaded_file.name)
-                        target = DOCUMENT_DIRECTORY / name
+                        file_hash = sha256_bytes(data)
+                        duplicate = find_duplicate(file_hash)
 
-                        if target.exists():
-                            target = DOCUMENT_DIRECTORY / (
-                                f"{target.stem}_{file_hash[:8]}"
-                                f"{target.suffix}"
-                            )
-
-                        target.write_bytes(data)
-
-                        try:
-                            load_document(target)
-
-                        except Exception as error:
-                            target.unlink(missing_ok=True)
-                            st.error(
-                                f"Document could not be processed: {error}"
+                        if duplicate:
+                            st.warning(
+                                "This file is already registered as "
+                                f"'{duplicate.get('title')}'. "
+                                "Nothing was added."
                             )
 
                         else:
-                            metadata = create_metadata(
-                                title=uploaded_file.name,
-                                department=department,
-                                document_type=document_type,
-                                academic_year=int(academic_year),
-                                version=version,
-                                effective_date=str(effective_date),
-                                allowed_roles=allowed_roles,
-                                file_path=str(target),
-                                status="draft",
-                                owner=user["username"],
-                            ).to_dict()
+                            name = safe_filename(uploaded_file.name)
+                            target = DOCUMENT_DIRECTORY / name
 
-                            metadata["file_hash"] = file_hash
+                            if target.exists():
+                                target = DOCUMENT_DIRECTORY / (
+                                    f"{target.stem}_{file_hash[:8]}"
+                                    f"{target.suffix}"
+                                )
 
-                            add_document_metadata(metadata)
+                            target.write_bytes(data)
 
-                            log_event(
-                                "document_upload",
-                                user["username"],
-                                f"{target.name} sha256={file_hash[:12]}",
-                            )
+                            try:
+                                load_document(target)
 
-                            st.session_state.upload_key += 1
-                            st.success(
-                                f"'{uploaded_file.name}' was added as a draft."
-                            )
-                            st.rerun()
+                            except Exception as error:
+                                target.unlink(missing_ok=True)
+                                st.error(
+                                    "Document could not be processed: "
+                                    f"{error}"
+                                )
 
-    else:
-        st.caption("Only Admin and Faculty users can upload documents.")
+                            else:
+                                metadata = create_metadata(
+                                    title=uploaded_file.name,
+                                    department=department,
+                                    document_type=document_type,
+                                    academic_year=int(academic_year),
+                                    version=version,
+                                    effective_date=str(effective_date),
+                                    allowed_roles=allowed_roles,
+                                    file_path=str(target),
+                                    status="draft",
+                                    owner=user["username"],
+                                ).to_dict()
+
+                                metadata["file_hash"] = file_hash
+
+                                add_document_metadata(metadata)
+
+                                log_event(
+                                    "document_upload",
+                                    user["username"],
+                                    f"{target.name} "
+                                    f"sha256={file_hash[:12]}",
+                                )
+
+                                st.session_state.upload_key += 1
+                                st.success(
+                                    f"'{uploaded_file.name}' was added "
+                                    "as a draft."
+                                )
+                                st.rerun()
+
+    with st.container(border=True):
+
+        st.markdown("### Documents you can access")
+
+        manager = can_manage_documents(user)
+
+        visible = []
+
+        for document in get_all_documents():
+            status = str(document.get("status") or "").lower()
+            mine = document.get("owner") == user["username"]
+
+            if manager:
+                visible.append(document)
+            elif mine or (
+                can_access_document(user, document) and status == "official"
+            ):
+                visible.append(document)
+
+        if not visible:
+            st.info("No documents are available to your account.")
+
+        for document in visible:
+
+            status = str(document.get("status") or "unknown").lower()
+
+            st.markdown(
+                f'<div class="doc-row"><b>'
+                f'{esc(document.get("title", "Unknown document"))}</b>'
+                f'<div class="doc-meta">'
+                f'{esc(document.get("document_type", ""))} • '
+                f'{esc(document.get("department", "Unknown"))} • '
+                f'{esc(document.get("academic_year", "N/A"))} • '
+                f'Version {esc(document.get("version", "N/A"))} • '
+                f"Status: <b>{esc(status)}</b></div></div>",
+                unsafe_allow_html=True,
+            )
+
+            if manager and status != "official":
+                if st.button(
+                    "Approve as official",
+                    key=f"approve_{document.get('file_path')}",
+                ):
+                    set_document_status(
+                        document.get("file_path"), "official",
+                        user["username"],
+                    )
+                    st.rerun()
+
+            if manager and status == "official":
+                if st.button(
+                    "Archive",
+                    key=f"archive_{document.get('file_path')}",
+                ):
+                    set_document_status(
+                        document.get("file_path"), "archived",
+                        user["username"],
+                    )
+                    st.rerun()
 
 
-# ------------------------------------------------------------
-# DOCUMENT LIST
-# ------------------------------------------------------------
+# ============================================================
+# PAGE: HISTORY
+# ============================================================
 
-with st.container(border=True):
+elif page == "History":
 
-    st.markdown("### 📚 Documents you can access")
+    st.markdown("## 🕘 Your question history")
+    st.caption("Only you can see this list.")
 
-    visible = [
-        document
-        for document in get_all_documents()
-        if can_access_document(user, document)
-        or document.get("owner") == user["username"]
-    ]
+    history = fb.get_history(user["username"], limit=50)
 
-    if not visible:
-        st.info("No documents are available to your account.")
+    if not history:
+        st.info("You have not asked any questions yet.")
 
-    for document in visible:
+    for item in history:
 
-        status = str(document.get("status") or "unknown").lower()
-
-        st.markdown(
-            f'<div class="doc-row"><b>'
-            f'{esc(document.get("title", "Unknown document"))}</b>'
-            f'<div class="doc-meta">'
-            f'{esc(document.get("document_type", ""))} • '
-            f'{esc(document.get("department", "Unknown"))} • '
-            f'{esc(document.get("academic_year", "N/A"))} • '
-            f'Version {esc(document.get("version", "N/A"))} • '
-            f"Status: <b>{esc(status)}</b></div></div>",
-            unsafe_allow_html=True,
+        color, label = STATUS_BADGES.get(
+            item["status"], STATUS_BADGES["BLOCKED"]
         )
 
-        if can_manage_documents(user) and status != "official":
+        with st.expander(f"{item['question'][:90]}  •  {item['created_at']}"):
+
+            st.markdown(
+                f'<span class="claim-pill" style="background:{color}">'
+                f"{esc(label)}</span>",
+                unsafe_allow_html=True,
+            )
+            st.write(item["answer"] or "")
+
+
+# ============================================================
+# PAGE: REVIEW (administrators)
+# ============================================================
+
+elif page == "Review":
+
+    require(can_manage_documents(user), "Administrators only.")
+
+    st.markdown("## ✅ Review")
+
+    registry = get_all_documents()
+
+    def count(status):
+        return sum(
+            1 for d in registry
+            if str(d.get("status") or "").lower() == status
+        )
+
+    summary = fb.get_feedback_summary()
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Official documents", count("official"))
+    c2.metric("Drafts awaiting review", count("draft"))
+    c3.metric("Questions asked", fb.count_queries())
+    c4.metric(
+        "Feedback 👍 / 👎",
+        f"{summary['up']} / {summary['down']}",
+    )
+
+    with st.container(border=True):
+
+        st.markdown("### Drafts awaiting approval")
+
+        drafts = [
+            d for d in registry
+            if str(d.get("status") or "").lower() == "draft"
+        ]
+
+        if not drafts:
+            st.info("No drafts are waiting.")
+
+        for document in drafts:
+
+            st.write(
+                f"**{document.get('title')}** — "
+                f"{document.get('document_type')} • "
+                f"{document.get('department')} • "
+                f"uploaded by {document.get('owner') or 'unknown'}"
+            )
+
             if st.button(
                 "Approve as official",
-                key=f"approve_{document.get('file_path')}",
+                key=f"rv_approve_{document.get('file_path')}",
             ):
                 set_document_status(
                     document.get("file_path"), "official", user["username"]
                 )
                 st.rerun()
 
-        if can_manage_documents(user) and status == "official":
-            if st.button(
-                "Archive",
-                key=f"archive_{document.get('file_path')}",
-            ):
-                set_document_status(
-                    document.get("file_path"), "archived", user["username"]
-                )
-                st.rerun()
+    with st.container(border=True):
+
+        st.markdown("### Recent feedback")
+
+        rows = fb.get_recent_feedback(limit=100)
+
+        if not rows:
+            st.info("No feedback yet.")
+
+        else:
+            frame = pd.DataFrame(rows)
+            frame["rating"] = frame["rating"].map({1: "👍", -1: "👎"})
+
+            st.dataframe(
+                frame[
+                    ["created_at", "username", "rating", "comment",
+                     "status", "question"]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+
+# ============================================================
+# PAGE: EVALUATION (administrators)
+# ============================================================
+
+elif page == "Evaluation":
+
+    require(can_manage_documents(user), "Administrators only.")
+
+    st.markdown("## 📊 Evaluation results")
+
+    path = Path("evaluation") / "eval_results.json"
+
+    if not path.exists():
+        st.info(
+            "No evaluation results yet. Run: "
+            "python -m evaluation.run_eval"
+        )
+
+    else:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        summary = data["summary"]
+
+        st.caption(
+            f"Dataset {summary['dataset_version']} • "
+            f"run on {summary['date']} • "
+            f"answer source: {summary['provider']}"
+        )
+
+        columns = st.columns(len(summary["by_kind"]))
+
+        for column, (kind, value) in zip(
+            columns, summary["by_kind"].items()
+        ):
+            column.metric(kind.replace("_", " "), value)
+
+        c1, c2 = st.columns(2)
+        c1.metric("Unauthorized leaks", summary["leaks"])
+        c2.metric("Median latency (ms)", int(summary["median_latency_ms"]))
+
+        st.dataframe(
+            pd.DataFrame(data["rows"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.caption(
+            "This is a small internal test set. Results show how the "
+            "system behaves on these questions, not general accuracy."
+        )
+
+
+# ============================================================
+# PAGE: AUDIT LOG (administrators)
+# ============================================================
+
+elif page == "Audit log":
+
+    require(can_view_audit_logs(user), "Administrators only.")
+
+    st.markdown("## 🧾 Audit log")
+
+    events = get_recent_events(limit=300)
+
+    if not events:
+        st.info("No events recorded yet.")
+
+    else:
+        frame = pd.DataFrame(events)
+
+        kinds = ["all"] + sorted(frame["event_type"].unique().tolist())
+        chosen = st.selectbox("Event type", kinds)
+
+        if chosen != "all":
+            frame = frame[frame["event_type"] == chosen]
+
+        st.dataframe(frame, use_container_width=True, hide_index=True)
