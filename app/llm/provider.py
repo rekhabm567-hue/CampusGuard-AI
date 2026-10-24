@@ -464,24 +464,25 @@ class MockLLMProvider(LLMProvider):
 
         query_lower = query.lower()
 
-        # Attendance
+        # Attendance: return the rule sentence exactly as written in the
+        # document, so it can be verified by quotation.
         if "attendance" in query_lower:
 
-            for item in content:
+            with_percent = [
+                item for item in content
+                if re.search(r"\d+(?:\.\d+)?\s*%", item)
+            ]
 
-                percentage = re.search(
-                    r"(\d+(?:\.\d+)?)\s*%",
-                    item
-                )
+            rules = [
+                item for item in with_percent
+                if re.search(r"minimum|required|at least", item, re.I)
+                and not re.search(r"below|less than|under|fails?", item, re.I)
+            ]
 
-                if percentage:
+            chosen = (rules or with_percent or [None])[0]
 
-                    return (
-                        "The applicable attendance "
-                        "requirement stated in the "
-                        "authorized evidence is "
-                        f"{percentage.group(1)}%."
-                    )
+            if chosen:
+                return chosen
 
         # CGPA
         if "cgpa" in query_lower:

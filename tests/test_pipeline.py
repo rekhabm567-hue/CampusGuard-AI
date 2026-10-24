@@ -98,7 +98,7 @@ EXAMPLE = (
 
 def test_attendance_example_with_72_percent():
     result = make_pipeline().process_query(STUDENT, EXAMPLE, [make_doc()])
-    assert result["status"] == "PARTIALLY VERIFIED"
+    assert result["status"] == "VERIFIED"
     assert "75%" in result["answer"]
     assert "below the 75% minimum" in result["answer"]
     assert result["eligibility_check"]["meets_minimum"] is False
@@ -246,7 +246,7 @@ def test_audit_event_contains_no_document_text():
     event_type, username, details = events[0]
     assert event_type == "query" and username == "student"
     assert "minimum attendance" not in details
-    assert json.loads(details)["status"] == "PARTIALLY VERIFIED"
+    assert json.loads(details)["status"] == "VERIFIED"
 
 
 def test_invalid_model_citation_blocks_answer():
