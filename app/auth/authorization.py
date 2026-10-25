@@ -1,5 +1,15 @@
-from datetime import date, datetime
+# ============================================================
+# AUTHORIZATION (fail closed)
+# LLM HALLUCINATION FIREWALL
+#
+# Two separate questions:
+#   can_access_document : may this USER see this document?
+#   is_document_active  : is the DOCUMENT currently authoritative?
+# filter_authorized_documents requires both, for every role.
+# Missing or malformed metadata means DENY.
+# ============================================================
 
+from datetime import date, datetime
 
 ROLE_PERMISSIONS = {
     "admin": {
@@ -21,7 +31,12 @@ ROLE_PERMISSIONS = {
     },
 }
 
-VISIBLE_STATUSES = {"official"}
+ROLE_LEVELS = {
+    "student": 1,
+    "staff": 2,
+    "faculty": 3,
+    "admin": 4,
+}
 
 GLOBAL_DEPARTMENTS = {
     "academic affairs",
@@ -33,21 +48,26 @@ GLOBAL_DEPARTMENTS = {
     "common",
 }
 
+# Only these statuses may be used as evidence.
+VISIBLE_STATUSES = {"official"}
+
 
 def _normalize(value):
     if value is None:
         return ""
-
     return str(value).strip().lower()
 
 
 def _normalize_roles(allowed_roles):
+    """Return a clean list of role names, or [] if unusable."""
+
+    if not allowed_roles:
+        return []
+
     if isinstance(allowed_roles, str):
         roles = allowed_roles.split(",")
-
     elif isinstance(allowed_roles, (list, tuple, set)):
         roles = list(allowed_roles)
-
     else:
         return []
 
@@ -59,30 +79,44 @@ def _normalize_roles(allowed_roles):
 
 
 def _parse_date(value):
+    """Return a date, or None if missing or malformed."""
+
+    if value is None or value == "":
+        return None
+
     if isinstance(value, datetime):
         return value.date()
 
     if isinstance(value, date):
         return value
 
-    if not value:
-        return None
-
     try:
         return date.fromisoformat(str(value).strip())
-    except (ValueError, TypeError):
+    except ValueError:
         return None
 
+
+# ============================================================
+# PERMISSIONS
+# ============================================================
 
 def has_permission(role, permission):
     role = _normalize(role)
     permission = _normalize(permission)
 
+    if not role or not permission:
+        return False
+
     return permission in ROLE_PERMISSIONS.get(role, set())
 
 
 def get_permissions(role):
-    return ROLE_PERMISSIONS.get(_normalize(role), set())
+    role = _normalize(role)
+
+    if not role:
+        return set()
+
+    return ROLE_PERMISSIONS.get(role, set())
 
 
 def is_valid_role(role):
@@ -90,23 +124,25 @@ def is_valid_role(role):
 
 
 def has_role_level(role, required_role):
-    levels = {
-        "student": 1,
-        "staff": 2,
-        "faculty": 3,
-        "admin": 4,
-    }
-
     role = _normalize(role)
     required_role = _normalize(required_role)
 
-    if role not in levels or required_role not in levels:
+    if not role or not required_role:
         return False
 
-    return levels[role] >= levels[required_role]
+    return (
+        ROLE_LEVELS.get(role, 0)
+        >= ROLE_LEVELS.get(required_role, 0)
+    )
 
+
+# ============================================================
+# DOCUMENT LIFECYCLE
+# ============================================================
 
 def is_document_active(document, today=None):
+    """True only for official, in-date, non-superseded documents."""
+
     if not isinstance(document, dict):
         return False
 
@@ -118,29 +154,32 @@ def is_document_active(document, today=None):
     if _normalize(document.get("superseded_by")):
         return False
 
-    effective_date = _parse_date(
-        document.get("effective_date")
-    )
+    effective = _parse_date(document.get("effective_date"))
 
-    # Missing or invalid effective date: deny access.
-    if effective_date is None or effective_date > today:
+    if effective is None or effective > today:
         return False
 
-    expiration_value = document.get("expiration_date")
+    raw_expiration = document.get("expiration_date")
 
-    if expiration_value:
-        expiration_date = _parse_date(expiration_value)
+    if raw_expiration not in (None, ""):
+        expiration = _parse_date(raw_expiration)
 
-        if expiration_date is None or expiration_date < today:
+        # Malformed expiration date: deny.
+        if expiration is None or expiration < today:
             return False
 
     return True
 
 
+# ============================================================
+# USER ACCESS
+# ============================================================
+
 def _department_matches(user_department, document_department):
     user_department = _normalize(user_department)
     document_department = _normalize(document_department)
 
+    # Missing document department: deny.
     if not document_department:
         return False
 
@@ -154,57 +193,45 @@ def _department_matches(user_department, document_department):
 
 
 def can_access_document(user, document):
-    """
-    Determine whether the authenticated user can access a document.
-    """
+    """May this user see this document? (Not a lifecycle check.)"""
 
-    if not isinstance(user, dict):
-        return False
-
-    if not isinstance(document, dict):
+    if not user or not isinstance(document, dict):
         return False
 
     role = _normalize(user.get("role"))
 
-    if role not in ROLE_PERMISSIONS:
+    if not is_valid_role(role):
         return False
 
-    # Admin has access to documents, subject to document lifecycle checks.
+    # Administrators may see every document.
     if role == "admin":
         return True
 
-    # A document must explicitly specify its permitted roles.
-    allowed_roles = _normalize_roles(
-        document.get("allowed_roles")
-    )
-
-    if not allowed_roles:
-        return False
-
-    # Check the authenticated user's role.
-    if role not in allowed_roles and "all" not in allowed_roles and "*" not in allowed_roles:
-        return False
-
-    # Enforce department restrictions.
     if not _department_matches(
         user.get("department"),
         document.get("department"),
     ):
         return False
 
-    return True
+    allowed_roles = _normalize_roles(
+        document.get("allowed_roles")
+    )
+
+    # Missing or unreadable role list: deny.
+    if not allowed_roles:
+        return False
+
+    return (
+        role in allowed_roles
+        or "all" in allowed_roles
+        or "*" in allowed_roles
+    )
 
 
 def filter_authorized_documents(user, documents, today=None):
-    """
-    Return only documents that the user can access
-    and that are currently official and active.
-    """
+    """Documents this user may see AND that are currently active."""
 
-    if not isinstance(user, dict):
-        return []
-
-    if not documents:
+    if not user or not documents:
         return []
 
     return [
@@ -220,10 +247,13 @@ def get_authorized_document_count(user, documents):
     return len(filter_authorized_documents(user, documents))
 
 
-def _role_has(user, permission):
-    if not isinstance(user, dict):
-        return False
+# ============================================================
+# ACTION CHECKS
+# ============================================================
 
+def _role_has(user, permission):
+    if not user:
+        return False
     return has_permission(user.get("role"), permission)
 
 
